@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Entrenador de Oído Absoluto</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app">
+    <h1>Entrenador de Oído Absoluto</h1>
+    <p class="subtitle">
+      Escucha la nota y tócala en tu piano. Sin teclado en pantalla.
+    </p>
+
+    <section class="panel">
+      <p><strong>Modo de entrada:</strong> <span id="input-mode-status">Sin iniciar</span></p>
+      <p><strong>Estado:</strong> <span id="connection-status">No inicializado</span></p>
+      <p><strong>Ronda:</strong> <span id="round">0</span></p>
+      <p><strong>Aciertos:</strong> <span id="hits">0</span></p>
+      <p><strong>Intentos:</strong> <span id="attempts">0</span></p>
+      <p><strong>Precisión:</strong> <span id="accuracy">0%</span></p>
+    </section>
+
+    <section class="controls">
+      <button id="start-btn">Iniciar juego</button>
+      <button id="replay-btn" disabled>Repetir nota</button>
+      <button id="skip-btn" disabled>Saltar</button>
+    </section>
+
+    <section class="panel">
+      <p>
+        <label for="game-mode-select">Modo de juego:</label>
+        <select id="game-mode-select">
+          <option value="single" selected>Nota individual</option>
+          <option value="triad">Acorde (3 notas)</option>
+        </select>
+      </p>
+      <p>
+        <label for="triad-mode-select">Acordes:</label>
+        <select id="triad-mode-select">
+          <option value="major">Mayores</option>
+          <option value="minor">Menores</option>
+          <option value="mixed" selected>Combinado</option>
+        </select>
+      </p>
+      <label id="white-only-option">
+        <input id="white-only-toggle" type="checkbox">
+        Modo solo teclas blancas
+      </label>
+      <label id="triad-natural-option" hidden>
+        <input id="triad-natural-toggle" type="checkbox" checked>
+        Solo acordes Do, Re, Mi, Fa, Sol, La, Si
+      </label>
+    </section>
+
+    <section class="panel panel-input">
+      <p class="panel-title">Entrada</p>
+      <p>
+        <label for="input-mode-select">Dispositivo:</label>
+        <select id="input-mode-select">
+          <option value="microphone" selected>Micrófono (recomendado)</option>
+          <option value="midi">Controlador MIDI</option>
+        </select>
+      </p>
+    </section>
+
+    <p id="message" class="message">
+      Pulsa “Iniciar juego” y concede permisos de audio/MIDI.
+    </p>
+  </main>
+
+  <div id="overlay" class="overlay"></div>
+
+  <script src="https://unpkg.com/tone@14.7.77/build/Tone.js"></script>
+  <script src="./script.js"></script>
+</body>
+</html>
