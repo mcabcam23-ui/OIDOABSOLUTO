@@ -43,6 +43,8 @@ let previousSingleNote = null;
 let previousChordSignature = null;
 let chordGuessPitchClasses = new Set();
 let chordGuessTimer = null;
+let singleGuessLockedNote = null;
+const midiHeldNotes = new Set();
 
 let micStream = null;
 let micSource = null;
@@ -55,7 +57,16 @@ let lastDetectedAt = 0;
 let micIgnoreUntilMs = 0;
 let micStableFramesRequired = 3;
 let micDetectionCooldownMs = 350;
-let micBlockExtraMs = 380;
+let micBlockExtraMs = 900;
+let micNeedsQuietOnset = true;
+let micSilenceAccumMs = 0;
+let micLastFrameAtMs = 0;
+let micSilenceRequiredMs = 260;
+let micSilenceRmsThreshold = 0.011;
+let micMinDetectRms = 0.016;
+let micPrevRms = 0;
+let micAttackArmed = false;
+let micAttackWindowUntilMs = 0;
 let hammerNoiseBuffer = null;
 let pianoSampler = null;
 let samplerReady = false;
@@ -150,6 +161,11 @@ function createHammerNoiseBuffer() {
 function blockMicDetectionFor(durationSeconds, extraMs = micBlockExtraMs) {
   const blockMs = Math.max(0, Math.round(durationSeconds * 1000) + extraMs);
   micIgnoreUntilMs = Math.max(micIgnoreUntilMs, Date.now() + blockMs);
+  micNeedsQuietOnset = true;
+  micSilenceAccumMs = 0;
+  micPrevRms = 0;
+  micAttackArmed = false;
+  micAttackWindowUntilMs = 0;
   stableDetectedNote = null;
   stableFrames = 0;
 }
@@ -341,17 +357,35 @@ function applyMicrophoneSettings() {
   const sensitivity = micSensitivitySelect.value;
   if (sensitivity === "high") {
     micStableFramesRequired = 2;
-    micDetectionCooldownMs = 250;
+    micDetectionCooldownMs = 220;
+    micSilenceRequiredMs = 180;
+    micSilenceRmsThreshold = 0.012;
+    micMinDetectRms = 0.012;
   } else if (sensitivity === "low") {
     micStableFramesRequired = 4;
     micDetectionCooldownMs = 500;
+    micSilenceRequiredMs = 360;
+    micSilenceRmsThreshold = 0.010;
+    micMinDetectRms = 0.022;
   } else {
     micStableFramesRequired = 3;
     micDetectionCooldownMs = 350;
+    micSilenceRequiredMs = 260;
+    micSilenceRmsThreshold = 0.011;
+    micMinDetectRms = 0.016;
   }
 
   const blockValue = Number.parseInt(micBlockSelect.value, 10);
-  micBlockExtraMs = Number.isFinite(blockValue) ? blockValue : 380;
+  micBlockExtraMs = Number.isFinite(blockValue) ? blockValue : 900;
+}
+
+function getBufferRms(buffer) {
+  let rms = 0;
+  for (let i = 0; i < buffer.length; i += 1) {
+    const value = buffer[i];
+    rms += value * value;
+  }
+  return Math.sqrt(rms / buffer.length);
 }
 
 function createTriadTarget() {
@@ -400,6 +434,7 @@ function beginRound() {
     chordGuessTimer = null;
   }
   chordGuessPitchClasses.clear();
+  singleGuessLockedNote = null;
 
   waitingNextRound = false;
   rounds += 1;
@@ -429,6 +464,9 @@ function beginRound() {
 
 function handleSingleGuess(note) {
   if (!isRunning || targetNote === null || waitingNextRound || gameMode !== "single") return;
+  if (singleGuessLockedNote === note) return;
+
+  singleGuessLockedNote = note;
   attempts += 1;
   if (note === targetNote) {
     waitingNextRound = true;
@@ -501,12 +539,21 @@ function handleGuess(note) {
 }
 
 function handleMidiMessage(event) {
-  if (!isRunning || targetNote === null || waitingNextRound) return;
-
   const [status, note, velocity] = event.data;
   const command = status & 0xf0;
+  const isNoteOff = command === 0x80 || (command === 0x90 && velocity === 0);
   const isNoteOn = command === 0x90 && velocity > 0;
+  if (isNoteOff) {
+    midiHeldNotes.delete(note);
+    if (singleGuessLockedNote === note) {
+      singleGuessLockedNote = null;
+    }
+    return;
+  }
+  if (!isRunning || targetNote === null || waitingNextRound) return;
   if (!isNoteOn) return;
+  if (midiHeldNotes.has(note)) return;
+  midiHeldNotes.add(note);
 
   handleGuess(note);
 }
@@ -530,6 +577,7 @@ function stopMidiInput() {
     activeInput.onmidimessage = null;
     activeInput = null;
   }
+  midiHeldNotes.clear();
 }
 
 function pickFirstMidiInput() {
@@ -605,12 +653,28 @@ function stopMicrophoneDetection() {
   stableDetectedNote = null;
   stableFrames = 0;
   micIgnoreUntilMs = 0;
+  micNeedsQuietOnset = true;
+  micSilenceAccumMs = 0;
+  micLastFrameAtMs = 0;
+  micPrevRms = 0;
+  micAttackArmed = false;
+  micAttackWindowUntilMs = 0;
+  singleGuessLockedNote = null;
 }
 
 function runMicrophoneLoop() {
   if (!micAnalyser || !micBuffer || inputMode !== "microphone") return;
 
+  const nowMs = performance.now();
+  const frameDeltaMs = micLastFrameAtMs > 0 ? nowMs - micLastFrameAtMs : 16;
+  micLastFrameAtMs = nowMs;
+
   if (Date.now() < micIgnoreUntilMs) {
+    micNeedsQuietOnset = true;
+    micSilenceAccumMs = 0;
+    micAttackArmed = false;
+    micAttackWindowUntilMs = 0;
+    micPrevRms = 0;
     stableDetectedNote = null;
     stableFrames = 0;
     micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
@@ -618,6 +682,62 @@ function runMicrophoneLoop() {
   }
 
   micAnalyser.getFloatTimeDomainData(micBuffer);
+  const rms = getBufferRms(micBuffer);
+
+  // Tras reproducir audio, exigimos un breve tramo de silencio del micro
+  // antes de volver a aceptar notas. Esto reduce la autocaptura del altavoz.
+  if (micNeedsQuietOnset) {
+    if (rms < micSilenceRmsThreshold) {
+      singleGuessLockedNote = null;
+      micSilenceAccumMs += frameDeltaMs;
+    } else {
+      micSilenceAccumMs = 0;
+    }
+
+    if (micSilenceAccumMs < micSilenceRequiredMs) {
+      micPrevRms = rms;
+      stableDetectedNote = null;
+      stableFrames = 0;
+      micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
+      return;
+    }
+
+    micNeedsQuietOnset = false;
+    micSilenceAccumMs = 0;
+  }
+
+  if (rms < micMinDetectRms) {
+    if (rms < micSilenceRmsThreshold) {
+      singleGuessLockedNote = null;
+    }
+    micPrevRms = rms;
+    stableDetectedNote = null;
+    stableFrames = 0;
+    micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
+    return;
+  }
+
+  // En nota individual, solo aceptamos detecciones tras un ataque nuevo
+  // (subida de energía), para evitar autocaptura de la cola del altavoz.
+  if (gameMode === "single") {
+    const attackThreshold = micMinDetectRms * 1.35;
+    const hasNewAttack = micPrevRms < micSilenceRmsThreshold && rms >= attackThreshold;
+    if (!micAttackArmed && hasNewAttack) {
+      micAttackArmed = true;
+      micAttackWindowUntilMs = Date.now() + 1400;
+      stableDetectedNote = null;
+      stableFrames = 0;
+    }
+
+    if (!micAttackArmed || Date.now() > micAttackWindowUntilMs) {
+      micPrevRms = rms;
+      stableDetectedNote = null;
+      stableFrames = 0;
+      micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
+      return;
+    }
+  }
+
   const frequency = autoCorrelate(micBuffer, audioContext.sampleRate);
   if (frequency > 0) {
     const midiNote = frequencyToMidi(frequency);
@@ -633,6 +753,10 @@ function runMicrophoneLoop() {
       if (stableFrames >= micStableFramesRequired && now - lastDetectedAt > micDetectionCooldownMs) {
         lastDetectedAt = now;
         handleGuess(midiNote);
+        if (gameMode === "single") {
+          micAttackArmed = false;
+          micAttackWindowUntilMs = 0;
+        }
       }
     }
   } else {
@@ -640,6 +764,7 @@ function runMicrophoneLoop() {
     stableFrames = 0;
   }
 
+  micPrevRms = rms;
   micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
 }
 
@@ -663,6 +788,12 @@ async function initializeMicrophone() {
   micAnalyser.fftSize = 2048;
   micBuffer = new Float32Array(micAnalyser.fftSize);
   micSource.connect(micAnalyser);
+  micNeedsQuietOnset = true;
+  micSilenceAccumMs = 0;
+  micLastFrameAtMs = 0;
+  micPrevRms = 0;
+  micAttackArmed = false;
+  micAttackWindowUntilMs = 0;
   connectionStatus.textContent = "Micrófono activo";
   runMicrophoneLoop();
 }
@@ -687,6 +818,7 @@ async function startGame() {
       chordGuessTimer = null;
     }
     chordGuessPitchClasses.clear();
+    singleGuessLockedNote = null;
     rounds = 0;
     hits = 0;
     attempts = 0;
