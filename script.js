@@ -64,9 +64,13 @@ let micLastFrameAtMs = 0;
 let micSilenceRequiredMs = 260;
 let micSilenceRmsThreshold = 0.011;
 let micMinDetectRms = 0.016;
+let micMaxCentsError = 45;
+let micHistorySize = 6;
+let micHistoryMatchRequired = 3;
 let micPrevRms = 0;
 let micAttackArmed = false;
 let micAttackWindowUntilMs = 0;
+let micRecentMidiNotes = [];
 let hammerNoiseBuffer = null;
 let pianoSampler = null;
 let samplerReady = false;
@@ -361,18 +365,27 @@ function applyMicrophoneSettings() {
     micSilenceRequiredMs = 130;
     micSilenceRmsThreshold = 0.0095;
     micMinDetectRms = 0.009;
+    micMaxCentsError = 55;
+    micHistorySize = 5;
+    micHistoryMatchRequired = 2;
   } else if (sensitivity === "low") {
     micStableFramesRequired = 4;
     micDetectionCooldownMs = 500;
     micSilenceRequiredMs = 300;
     micSilenceRmsThreshold = 0.0105;
     micMinDetectRms = 0.016;
+    micMaxCentsError = 35;
+    micHistorySize = 7;
+    micHistoryMatchRequired = 4;
   } else {
     micStableFramesRequired = 3;
     micDetectionCooldownMs = 280;
     micSilenceRequiredMs = 200;
     micSilenceRmsThreshold = 0.01;
     micMinDetectRms = 0.012;
+    micMaxCentsError = 42;
+    micHistorySize = 6;
+    micHistoryMatchRequired = 3;
   }
 
   const blockValue = Number.parseInt(micBlockSelect.value, 10);
@@ -386,6 +399,38 @@ function getBufferRms(buffer) {
     rms += value * value;
   }
   return Math.sqrt(rms / buffer.length);
+}
+
+function pushMicNoteHistory(note) {
+  micRecentMidiNotes.push(note);
+  if (micRecentMidiNotes.length > micHistorySize) {
+    micRecentMidiNotes.shift();
+  }
+}
+
+function clearMicNoteHistory() {
+  micRecentMidiNotes = [];
+}
+
+function getDominantMicNote() {
+  if (micRecentMidiNotes.length < micHistoryMatchRequired) return null;
+
+  const counts = new Map();
+  micRecentMidiNotes.forEach((note) => {
+    counts.set(note, (counts.get(note) || 0) + 1);
+  });
+
+  let bestNote = null;
+  let bestCount = 0;
+  counts.forEach((count, note) => {
+    if (count > bestCount) {
+      bestCount = count;
+      bestNote = note;
+    }
+  });
+
+  if (bestCount < micHistoryMatchRequired) return null;
+  return bestNote;
 }
 
 function createTriadTarget() {
@@ -664,6 +709,7 @@ function stopMicrophoneDetection() {
   micPrevRms = 0;
   micAttackArmed = false;
   micAttackWindowUntilMs = 0;
+  clearMicNoteHistory();
   singleGuessLockedNote = null;
 }
 
@@ -680,6 +726,7 @@ function runMicrophoneLoop() {
     micAttackArmed = false;
     micAttackWindowUntilMs = 0;
     micPrevRms = 0;
+    clearMicNoteHistory();
     stableDetectedNote = null;
     stableFrames = 0;
     micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
@@ -701,6 +748,7 @@ function runMicrophoneLoop() {
 
     if (micSilenceAccumMs < micSilenceRequiredMs) {
       micPrevRms = rms;
+      clearMicNoteHistory();
       stableDetectedNote = null;
       stableFrames = 0;
       micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
@@ -716,6 +764,7 @@ function runMicrophoneLoop() {
       singleGuessLockedNote = null;
     }
     micPrevRms = rms;
+    clearMicNoteHistory();
     stableDetectedNote = null;
     stableFrames = 0;
     micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
@@ -740,6 +789,7 @@ function runMicrophoneLoop() {
 
     if (!micAttackArmed || Date.now() > micAttackWindowUntilMs) {
       micPrevRms = rms;
+      clearMicNoteHistory();
       stableDetectedNote = null;
       stableFrames = 0;
       micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
@@ -749,26 +799,43 @@ function runMicrophoneLoop() {
 
   const frequency = autoCorrelate(micBuffer, audioContext.sampleRate);
   if (frequency > 0) {
-    const midiNote = frequencyToMidi(frequency);
-    if (midiNote >= MIN_MIDI_NOTE && midiNote <= MAX_MIDI_NOTE) {
-      if (stableDetectedNote === midiNote) {
+    const midiFloat = 69 + 12 * Math.log2(frequency / 440);
+    const roundedMidi = Math.round(midiFloat);
+    const centsError = Math.abs((midiFloat - roundedMidi) * 100);
+
+    if (roundedMidi >= MIN_MIDI_NOTE && roundedMidi <= MAX_MIDI_NOTE && centsError <= micMaxCentsError) {
+      pushMicNoteHistory(roundedMidi);
+      const dominantMidi = getDominantMicNote();
+      if (dominantMidi === null) {
+        micPrevRms = rms;
+        micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
+        return;
+      }
+
+      if (stableDetectedNote === dominantMidi) {
         stableFrames += 1;
       } else {
-        stableDetectedNote = midiNote;
+        stableDetectedNote = dominantMidi;
         stableFrames = 1;
       }
 
       const now = Date.now();
       if (stableFrames >= micStableFramesRequired && now - lastDetectedAt > micDetectionCooldownMs) {
         lastDetectedAt = now;
-        handleGuess(midiNote);
+        handleGuess(dominantMidi);
+        clearMicNoteHistory();
         if (gameMode === "single") {
           micAttackArmed = false;
           micAttackWindowUntilMs = 0;
         }
       }
+    } else {
+      clearMicNoteHistory();
+      stableDetectedNote = null;
+      stableFrames = 0;
     }
   } else {
+    clearMicNoteHistory();
     stableDetectedNote = null;
     stableFrames = 0;
   }
@@ -803,6 +870,7 @@ async function initializeMicrophone() {
   micPrevRms = 0;
   micAttackArmed = false;
   micAttackWindowUntilMs = 0;
+  clearMicNoteHistory();
   connectionStatus.textContent = "Micrófono activo";
   runMicrophoneLoop();
 }
