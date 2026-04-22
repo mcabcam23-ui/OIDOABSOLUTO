@@ -17,8 +17,8 @@ const hitsEl = document.getElementById("hits");
 const attemptsEl = document.getElementById("attempts");
 const accuracyEl = document.getElementById("accuracy");
 
-const MIN_MIDI_NOTE = 21; // A0
-const MAX_MIDI_NOTE = 108; // C8
+const MIN_MIDI_NOTE = 36; // C2
+const MAX_MIDI_NOTE = 85; // C6 (50 notas exactas)
 
 let audioContext = null;
 let midiAccess = null;
@@ -36,6 +36,8 @@ let triadMode = "mixed";
 let triadNaturalOnlyMode = true;
 let targetChordNotes = null;
 let targetChordPitchClasses = null;
+let previousSingleNote = null;
+let previousChordSignature = null;
 let chordGuessPitchClasses = new Set();
 let chordGuessTimer = null;
 
@@ -47,6 +49,7 @@ let micAnimationFrame = null;
 let stableDetectedNote = null;
 let stableFrames = 0;
 let lastDetectedAt = 0;
+let micIgnoreUntilMs = 0;
 let hammerNoiseBuffer = null;
 let pianoSampler = null;
 let samplerReady = false;
@@ -138,10 +141,19 @@ function createHammerNoiseBuffer() {
   return buffer;
 }
 
-function playPianoLikeNote(midiNote, duration = 2.4) {
+function blockMicDetectionFor(durationSeconds, extraMs = 380) {
+  const blockMs = Math.max(0, Math.round(durationSeconds * 1000) + extraMs);
+  micIgnoreUntilMs = Math.max(micIgnoreUntilMs, Date.now() + blockMs);
+  stableDetectedNote = null;
+  stableFrames = 0;
+}
+
+function playPianoLikeNote(midiNote, duration = 1.0) {
   if (samplerReady && pianoSampler) {
+    const playedDuration = Math.max(1.0, duration);
+    blockMicDetectionFor(playedDuration);
     const noteName = midiToNoteName(midiNote);
-    pianoSampler.triggerAttackRelease(noteName, Math.max(1.8, duration), undefined, 0.95);
+    pianoSampler.triggerAttackRelease(noteName, playedDuration, undefined, 0.95);
     return;
   }
 
@@ -154,13 +166,14 @@ function playTriadChord(notes, duration = 2.4) {
   });
 }
 
-function playFallbackPianoNote(midiNote, duration = 2.4) {
+function playFallbackPianoNote(midiNote, duration = 1.0) {
   if (!audioContext) return;
 
   const now = audioContext.currentTime;
   const baseFreq = midiToFrequency(midiNote);
   const noteBrightness = Math.min(1, Math.max(0, (midiNote - 24) / 72));
-  const noteDuration = Math.max(2.0, duration);
+  const noteDuration = Math.max(1.0, duration);
+  blockMicDetectionFor(noteDuration);
 
   const master = audioContext.createGain();
   master.gain.setValueAtTime(0.0001, now);
@@ -284,6 +297,16 @@ function randomTargetNote() {
   return whiteKeys[randomIndex];
 }
 
+function randomTargetNoteWithoutImmediateRepeat() {
+  const MAX_TRIES = 20;
+  let nextNote = randomTargetNote();
+  for (let i = 0; i < MAX_TRIES && previousSingleNote !== null && nextNote === previousSingleNote; i += 1) {
+    nextNote = randomTargetNote();
+  }
+  previousSingleNote = nextNote;
+  return nextNote;
+}
+
 function randomTriadQuality() {
   if (triadMode === "major") return "major";
   if (triadMode === "minor") return "minor";
@@ -291,10 +314,10 @@ function randomTriadQuality() {
 }
 
 function updateGameModeOptionsVisibility() {
-  const isSingleMode = gameModeSelect.value === "single";
-  whiteOnlyOption.hidden = !isSingleMode;
-  triadNaturalOption.hidden = isSingleMode;
-  if (!isSingleMode) {
+  const isTriadMode = gameModeSelect.value === "triad";
+  whiteOnlyOption.hidden = isTriadMode;
+  triadNaturalOption.hidden = !isTriadMode;
+  if (isTriadMode) {
     whiteOnlyToggle.checked = false;
     whiteOnlyMode = false;
   }
@@ -311,6 +334,18 @@ function createTriadTarget() {
   const notes = intervals.map((interval) => rootMidi + interval);
   const pitchClasses = intervals.map((interval) => toPitchClass(rootMidi + interval)).sort((a, b) => a - b);
   return { notes, pitchClasses, quality };
+}
+
+function createTriadTargetWithoutImmediateRepeat() {
+  const MAX_TRIES = 20;
+  let triad = createTriadTarget();
+  let signature = `${triad.quality}:${triad.pitchClasses.join("-")}`;
+  for (let i = 0; i < MAX_TRIES && previousChordSignature !== null && signature === previousChordSignature; i += 1) {
+    triad = createTriadTarget();
+    signature = `${triad.quality}:${triad.pitchClasses.join("-")}`;
+  }
+  previousChordSignature = signature;
+  return triad;
 }
 
 function flashOverlay(type, milliseconds) {
@@ -340,7 +375,7 @@ function beginRound() {
   updateStats();
 
   if (gameMode === "triad") {
-    const triad = createTriadTarget();
+    const triad = createTriadTargetWithoutImmediateRepeat();
     targetChordNotes = triad.notes;
     targetChordPitchClasses = triad.pitchClasses;
     targetNote = null;
@@ -354,7 +389,7 @@ function beginRound() {
 
   targetChordNotes = null;
   targetChordPitchClasses = null;
-  targetNote = randomTargetNote();
+  targetNote = randomTargetNoteWithoutImmediateRepeat();
   message.textContent = whiteOnlyMode
     ? "Escucha y toca la nota correcta (solo teclas blancas)."
     : "Escucha y toca la nota correcta en tu piano.";
@@ -538,10 +573,18 @@ function stopMicrophoneDetection() {
   micBuffer = null;
   stableDetectedNote = null;
   stableFrames = 0;
+  micIgnoreUntilMs = 0;
 }
 
 function runMicrophoneLoop() {
   if (!micAnalyser || !micBuffer || inputMode !== "microphone") return;
+
+  if (Date.now() < micIgnoreUntilMs) {
+    stableDetectedNote = null;
+    stableFrames = 0;
+    micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
+    return;
+  }
 
   micAnalyser.getFloatTimeDomainData(micBuffer);
   const frequency = autoCorrelate(micBuffer, audioContext.sampleRate);
@@ -577,9 +620,9 @@ async function initializeMicrophone() {
   stopMicrophoneDetection();
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
     },
     video: false,
   });
