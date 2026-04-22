@@ -8,6 +8,9 @@ const triadNaturalOption = document.getElementById("triad-natural-option");
 const gameModeSelect = document.getElementById("game-mode-select");
 const triadModeSelect = document.getElementById("triad-mode-select");
 const inputModeSelect = document.getElementById("input-mode-select");
+const micSettings = document.getElementById("mic-settings");
+const micSensitivitySelect = document.getElementById("mic-sensitivity-select");
+const micBlockSelect = document.getElementById("mic-block-select");
 const inputModeStatus = document.getElementById("input-mode-status");
 const connectionStatus = document.getElementById("connection-status");
 const message = document.getElementById("message");
@@ -50,6 +53,9 @@ let stableDetectedNote = null;
 let stableFrames = 0;
 let lastDetectedAt = 0;
 let micIgnoreUntilMs = 0;
+let micStableFramesRequired = 3;
+let micDetectionCooldownMs = 350;
+let micBlockExtraMs = 380;
 let hammerNoiseBuffer = null;
 let pianoSampler = null;
 let samplerReady = false;
@@ -141,7 +147,7 @@ function createHammerNoiseBuffer() {
   return buffer;
 }
 
-function blockMicDetectionFor(durationSeconds, extraMs = 380) {
+function blockMicDetectionFor(durationSeconds, extraMs = micBlockExtraMs) {
   const blockMs = Math.max(0, Math.round(durationSeconds * 1000) + extraMs);
   micIgnoreUntilMs = Math.max(micIgnoreUntilMs, Date.now() + blockMs);
   stableDetectedNote = null;
@@ -317,10 +323,35 @@ function updateGameModeOptionsVisibility() {
   const isTriadMode = gameModeSelect.value === "triad";
   whiteOnlyOption.hidden = isTriadMode;
   triadNaturalOption.hidden = !isTriadMode;
+  whiteOnlyOption.style.display = isTriadMode ? "none" : "flex";
+  triadNaturalOption.style.display = isTriadMode ? "flex" : "none";
   if (isTriadMode) {
     whiteOnlyToggle.checked = false;
     whiteOnlyMode = false;
   }
+}
+
+function updateInputModeVisibility() {
+  const isMicInput = inputModeSelect.value === "microphone";
+  micSettings.hidden = !isMicInput;
+  micSettings.style.display = isMicInput ? "block" : "none";
+}
+
+function applyMicrophoneSettings() {
+  const sensitivity = micSensitivitySelect.value;
+  if (sensitivity === "high") {
+    micStableFramesRequired = 2;
+    micDetectionCooldownMs = 250;
+  } else if (sensitivity === "low") {
+    micStableFramesRequired = 4;
+    micDetectionCooldownMs = 500;
+  } else {
+    micStableFramesRequired = 3;
+    micDetectionCooldownMs = 350;
+  }
+
+  const blockValue = Number.parseInt(micBlockSelect.value, 10);
+  micBlockExtraMs = Number.isFinite(blockValue) ? blockValue : 380;
 }
 
 function createTriadTarget() {
@@ -599,7 +630,7 @@ function runMicrophoneLoop() {
       }
 
       const now = Date.now();
-      if (stableFrames >= 3 && now - lastDetectedAt > 350) {
+      if (stableFrames >= micStableFramesRequired && now - lastDetectedAt > micDetectionCooldownMs) {
         lastDetectedAt = now;
         handleGuess(midiNote);
       }
@@ -665,6 +696,7 @@ async function startGame() {
     gameMode = gameModeSelect.value;
     triadMode = triadModeSelect.value;
     triadNaturalOnlyMode = triadNaturalToggle.checked;
+    applyMicrophoneSettings();
     inputModeStatus.textContent = inputMode === "microphone" ? "Micrófono" : "MIDI";
 
     if (inputMode === "microphone") {
@@ -726,6 +758,7 @@ whiteOnlyToggle.addEventListener("change", () => {
 });
 
 inputModeSelect.addEventListener("change", () => {
+  updateInputModeVisibility();
   if (isRunning) {
     message.textContent = "El cambio de entrada se aplicará al reiniciar la partida.";
   }
@@ -752,3 +785,4 @@ triadNaturalToggle.addEventListener("change", () => {
 });
 
 updateGameModeOptionsVisibility();
+updateInputModeVisibility();

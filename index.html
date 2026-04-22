@@ -63,6 +63,25 @@
           <option value="midi">Controlador MIDI</option>
         </select>
       </p>
+      <div id="mic-settings">
+        <p class="panel-title">Ajustes de micrófono</p>
+        <p>
+          <label for="mic-sensitivity-select">Sensibilidad:</label>
+          <select id="mic-sensitivity-select">
+            <option value="high">Alta</option>
+            <option value="medium" selected>Media</option>
+            <option value="low">Baja</option>
+          </select>
+        </p>
+        <p>
+          <label for="mic-block-select">Bloqueo anti eco:</label>
+          <select id="mic-block-select">
+            <option value="250">Corto</option>
+            <option value="380" selected>Normal</option>
+            <option value="600">Largo</option>
+          </select>
+        </p>
+      </div>
     </section>
 
     <p id="message" class="message">
