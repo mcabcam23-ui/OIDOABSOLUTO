@@ -357,22 +357,22 @@ function applyMicrophoneSettings() {
   const sensitivity = micSensitivitySelect.value;
   if (sensitivity === "high") {
     micStableFramesRequired = 2;
-    micDetectionCooldownMs = 220;
-    micSilenceRequiredMs = 180;
-    micSilenceRmsThreshold = 0.012;
-    micMinDetectRms = 0.012;
+    micDetectionCooldownMs = 180;
+    micSilenceRequiredMs = 130;
+    micSilenceRmsThreshold = 0.0095;
+    micMinDetectRms = 0.009;
   } else if (sensitivity === "low") {
     micStableFramesRequired = 4;
     micDetectionCooldownMs = 500;
-    micSilenceRequiredMs = 360;
-    micSilenceRmsThreshold = 0.010;
-    micMinDetectRms = 0.022;
+    micSilenceRequiredMs = 300;
+    micSilenceRmsThreshold = 0.0105;
+    micMinDetectRms = 0.016;
   } else {
     micStableFramesRequired = 3;
-    micDetectionCooldownMs = 350;
-    micSilenceRequiredMs = 260;
-    micSilenceRmsThreshold = 0.011;
-    micMinDetectRms = 0.016;
+    micDetectionCooldownMs = 280;
+    micSilenceRequiredMs = 200;
+    micSilenceRmsThreshold = 0.01;
+    micMinDetectRms = 0.012;
   }
 
   const blockValue = Number.parseInt(micBlockSelect.value, 10);
@@ -612,12 +612,17 @@ function autoCorrelate(buffer, sampleRate) {
     rms += value * value;
   }
   rms = Math.sqrt(rms / buffer.length);
-  if (rms < 0.01) return -1;
+  if (rms < 0.006) return -1;
 
   let bestOffset = -1;
   let bestCorrelation = 0;
+  const minFrequency = midiToFrequency(MAX_MIDI_NOTE);
+  const maxFrequency = midiToFrequency(MIN_MIDI_NOTE);
+  const minOffset = Math.max(2, Math.floor(sampleRate / maxFrequency));
+  const maxOffset = Math.min(Math.floor(buffer.length / 2), Math.ceil(sampleRate / minFrequency));
   const maxSamples = Math.floor(buffer.length / 2);
-  for (let offset = 8; offset < maxSamples; offset += 1) {
+
+  for (let offset = minOffset; offset <= maxOffset; offset += 1) {
     let correlation = 0;
     for (let i = 0; i < maxSamples; i += 1) {
       correlation += Math.abs(buffer[i] - buffer[i + offset]);
@@ -629,7 +634,7 @@ function autoCorrelate(buffer, sampleRate) {
     }
   }
 
-  if (bestCorrelation > 0.9 && bestOffset > 0) {
+  if (bestCorrelation > 0.78 && bestOffset > 0) {
     return sampleRate / bestOffset;
   }
   return -1;
@@ -720,8 +725,12 @@ function runMicrophoneLoop() {
   // En nota individual, solo aceptamos detecciones tras un ataque nuevo
   // (subida de energía), para evitar autocaptura de la cola del altavoz.
   if (gameMode === "single") {
-    const attackThreshold = micMinDetectRms * 1.35;
-    const hasNewAttack = micPrevRms < micSilenceRmsThreshold && rms >= attackThreshold;
+    const attackThreshold = micMinDetectRms * 1.25;
+    const strongRise = rms - micPrevRms > micMinDetectRms * 0.45;
+    const hasNewAttack =
+      (micPrevRms < micSilenceRmsThreshold && rms >= attackThreshold) ||
+      strongRise ||
+      rms > attackThreshold * 1.8;
     if (!micAttackArmed && hasNewAttack) {
       micAttackArmed = true;
       micAttackWindowUntilMs = Date.now() + 1400;
@@ -785,7 +794,7 @@ async function initializeMicrophone() {
 
   micSource = audioContext.createMediaStreamSource(micStream);
   micAnalyser = audioContext.createAnalyser();
-  micAnalyser.fftSize = 2048;
+  micAnalyser.fftSize = 4096;
   micBuffer = new Float32Array(micAnalyser.fftSize);
   micSource.connect(micAnalyser);
   micNeedsQuietOnset = true;
