@@ -70,7 +70,7 @@ let micMinDetectRms = 0.016;
 let micMaxCentsError = 45;
 let micHistorySize = 6;
 let micHistoryMatchRequired = 3;
-let micHarmonicityMin = 1.55;
+let micHarmonicityMin = 1.05;
 let micPrevRms = 0;
 let micAttackArmed = false;
 let micAttackWindowUntilMs = 0;
@@ -388,7 +388,7 @@ function applyMicrophoneSettings() {
     micMaxCentsError = 65;
     micHistorySize = 5;
     micHistoryMatchRequired = 2;
-    micHarmonicityMin = 1.35;
+    micHarmonicityMin = 1.0;
   } else if (sensitivity === "low") {
     micStableFramesRequired = 4;
     micDetectionCooldownMs = 500;
@@ -398,7 +398,7 @@ function applyMicrophoneSettings() {
     micMaxCentsError = 38;
     micHistorySize = 7;
     micHistoryMatchRequired = 4;
-    micHarmonicityMin = 1.7;
+    micHarmonicityMin = 1.15;
   } else {
     micStableFramesRequired = 3;
     micDetectionCooldownMs = 280;
@@ -408,7 +408,7 @@ function applyMicrophoneSettings() {
     micMaxCentsError = 48;
     micHistorySize = 6;
     micHistoryMatchRequired = 3;
-    micHarmonicityMin = 1.55;
+    micHarmonicityMin = 1.05;
   }
 
   const blockValue = Number.parseInt(micBlockSelect.value, 10);
@@ -880,7 +880,9 @@ function runMicrophoneLoop() {
   const frequency = autoCorrelate(micBuffer, audioContext.sampleRate);
   if (frequency > 0) {
     const harmonicity = estimateHarmonicity(frequency);
-    if (harmonicity < micHarmonicityMin) {
+    const harmonicityTooLow = harmonicity < micHarmonicityMin;
+    const strongSignal = rms > micMinDetectRms * 2.1;
+    if (harmonicityTooLow && !strongSignal) {
       clearMicNoteHistory();
       stableDetectedNote = null;
       stableFrames = 0;
