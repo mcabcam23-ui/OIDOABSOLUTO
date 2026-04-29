@@ -20,8 +20,8 @@ const hitsEl = document.getElementById("hits");
 const attemptsEl = document.getElementById("attempts");
 const accuracyEl = document.getElementById("accuracy");
 
-const MIN_MIDI_NOTE = 36; // C2
-const MAX_MIDI_NOTE = 85; // C6 (50 notas exactas)
+const MIN_MIDI_NOTE = 21; // A0
+const MAX_MIDI_NOTE = 108; // C8
 
 let audioContext = null;
 let midiAccess = null;
@@ -48,8 +48,11 @@ const midiHeldNotes = new Set();
 
 let micStream = null;
 let micSource = null;
+let micHighpassFilter = null;
+let micLowpassFilter = null;
 let micAnalyser = null;
 let micBuffer = null;
+let micFreqBuffer = null;
 let micAnimationFrame = null;
 let stableDetectedNote = null;
 let stableFrames = 0;
@@ -67,6 +70,7 @@ let micMinDetectRms = 0.016;
 let micMaxCentsError = 45;
 let micHistorySize = 6;
 let micHistoryMatchRequired = 3;
+let micHarmonicityMin = 1.55;
 let micPrevRms = 0;
 let micAttackArmed = false;
 let micAttackWindowUntilMs = 0;
@@ -365,27 +369,30 @@ function applyMicrophoneSettings() {
     micSilenceRequiredMs = 130;
     micSilenceRmsThreshold = 0.0095;
     micMinDetectRms = 0.009;
-    micMaxCentsError = 55;
+    micMaxCentsError = 65;
     micHistorySize = 5;
     micHistoryMatchRequired = 2;
+    micHarmonicityMin = 1.35;
   } else if (sensitivity === "low") {
     micStableFramesRequired = 4;
     micDetectionCooldownMs = 500;
     micSilenceRequiredMs = 300;
     micSilenceRmsThreshold = 0.0105;
     micMinDetectRms = 0.016;
-    micMaxCentsError = 35;
+    micMaxCentsError = 38;
     micHistorySize = 7;
     micHistoryMatchRequired = 4;
+    micHarmonicityMin = 1.7;
   } else {
     micStableFramesRequired = 3;
     micDetectionCooldownMs = 280;
     micSilenceRequiredMs = 200;
     micSilenceRmsThreshold = 0.01;
     micMinDetectRms = 0.012;
-    micMaxCentsError = 42;
+    micMaxCentsError = 48;
     micHistorySize = 6;
     micHistoryMatchRequired = 3;
+    micHarmonicityMin = 1.55;
   }
 
   const blockValue = Number.parseInt(micBlockSelect.value, 10);
@@ -399,6 +406,45 @@ function getBufferRms(buffer) {
     rms += value * value;
   }
   return Math.sqrt(rms / buffer.length);
+}
+
+function estimateHarmonicity(frequency) {
+  if (!micAnalyser || !micFreqBuffer || !audioContext || frequency <= 0) return 0;
+
+  micAnalyser.getFloatFrequencyData(micFreqBuffer);
+  const nyquist = audioContext.sampleRate / 2;
+  const binHz = nyquist / micFreqBuffer.length;
+  const maxBin = micFreqBuffer.length - 1;
+
+  function linearFromDb(db) {
+    if (!Number.isFinite(db) || db <= -120) return 0;
+    return 10 ** (db / 20);
+  }
+
+  function sampleBandEnergy(centerHz, halfWidthBins = 1) {
+    const centerBin = Math.round(centerHz / binHz);
+    if (centerBin < 1 || centerBin > maxBin) return 0;
+    let energy = 0;
+    let samples = 0;
+    const start = Math.max(1, centerBin - halfWidthBins);
+    const end = Math.min(maxBin, centerBin + halfWidthBins);
+    for (let i = start; i <= end; i += 1) {
+      energy += linearFromDb(micFreqBuffer[i]);
+      samples += 1;
+    }
+    return samples > 0 ? energy / samples : 0;
+  }
+
+  const fundamental = sampleBandEnergy(frequency, 1);
+  const h2 = sampleBandEnergy(frequency * 2, 1);
+  const h3 = sampleBandEnergy(frequency * 3, 1);
+  const off1 = sampleBandEnergy(frequency * 1.5, 2);
+  const off2 = sampleBandEnergy(frequency * 2.5, 2);
+  const off3 = sampleBandEnergy(frequency * 3.5, 2);
+
+  const harmonicEnergy = fundamental + h2 * 0.7 + h3 * 0.5;
+  const offEnergy = off1 + off2 + off3 + 1e-6;
+  return harmonicEnergy / offEnergy;
 }
 
 function pushMicNoteHistory(note) {
@@ -694,12 +740,21 @@ function stopMicrophoneDetection() {
     micSource.disconnect();
     micSource = null;
   }
+  if (micHighpassFilter) {
+    micHighpassFilter.disconnect();
+    micHighpassFilter = null;
+  }
+  if (micLowpassFilter) {
+    micLowpassFilter.disconnect();
+    micLowpassFilter = null;
+  }
   if (micStream) {
     micStream.getTracks().forEach((track) => track.stop());
     micStream = null;
   }
   micAnalyser = null;
   micBuffer = null;
+  micFreqBuffer = null;
   stableDetectedNote = null;
   stableFrames = 0;
   micIgnoreUntilMs = 0;
@@ -799,6 +854,16 @@ function runMicrophoneLoop() {
 
   const frequency = autoCorrelate(micBuffer, audioContext.sampleRate);
   if (frequency > 0) {
+    const harmonicity = estimateHarmonicity(frequency);
+    if (harmonicity < micHarmonicityMin) {
+      clearMicNoteHistory();
+      stableDetectedNote = null;
+      stableFrames = 0;
+      micPrevRms = rms;
+      micAnimationFrame = requestAnimationFrame(runMicrophoneLoop);
+      return;
+    }
+
     const midiFloat = 69 + 12 * Math.log2(frequency / 440);
     const roundedMidi = Math.round(midiFloat);
     const centsError = Math.abs((midiFloat - roundedMidi) * 100);
@@ -860,10 +925,19 @@ async function initializeMicrophone() {
   });
 
   micSource = audioContext.createMediaStreamSource(micStream);
+  micHighpassFilter = audioContext.createBiquadFilter();
+  micHighpassFilter.type = "highpass";
+  micHighpassFilter.frequency.value = 70;
+  micLowpassFilter = audioContext.createBiquadFilter();
+  micLowpassFilter.type = "lowpass";
+  micLowpassFilter.frequency.value = 4800;
   micAnalyser = audioContext.createAnalyser();
-  micAnalyser.fftSize = 4096;
+  micAnalyser.fftSize = 8192;
   micBuffer = new Float32Array(micAnalyser.fftSize);
-  micSource.connect(micAnalyser);
+  micFreqBuffer = new Float32Array(micAnalyser.frequencyBinCount);
+  micSource.connect(micHighpassFilter);
+  micHighpassFilter.connect(micLowpassFilter);
+  micLowpassFilter.connect(micAnalyser);
   micNeedsQuietOnset = true;
   micSilenceAccumMs = 0;
   micLastFrameAtMs = 0;
