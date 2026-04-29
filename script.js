@@ -75,9 +75,11 @@ let micPrevRms = 0;
 let micAttackArmed = false;
 let micAttackWindowUntilMs = 0;
 let micRecentMidiNotes = [];
+let overlayTimeoutId = null;
 let hammerNoiseBuffer = null;
 let pianoSampler = null;
 let samplerReady = false;
+let samplerLoadingPromise = null;
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PIANO_SAMPLE_URLS = {
@@ -134,25 +136,39 @@ function toPitchClass(midiNote) {
 
 async function ensurePianoSampler() {
   if (samplerReady && pianoSampler) return true;
+  if (samplerLoadingPromise) {
+    await samplerLoadingPromise;
+    return samplerReady && Boolean(pianoSampler);
+  }
   if (typeof Tone === "undefined") return false;
 
-  try {
-    await Tone.start();
-    if (!pianoSampler) {
-      pianoSampler = new Tone.Sampler({
-        urls: PIANO_SAMPLE_URLS,
-        release: 2.2,
-        baseUrl: "https://tonejs.github.io/audio/salamander/",
-      }).toDestination();
+  samplerLoadingPromise = (async () => {
+    try {
+      await Tone.start();
+      if (!pianoSampler) {
+        pianoSampler = new Tone.Sampler({
+          urls: PIANO_SAMPLE_URLS,
+          release: 2.2,
+          baseUrl: "https://tonejs.github.io/audio/salamander/",
+        }).toDestination();
+      }
+      await Tone.loaded();
+      samplerReady = true;
+    } catch (error) {
+      samplerReady = false;
+      console.error("No se pudo cargar el sampler de piano:", error);
     }
-    await Tone.loaded();
-    samplerReady = true;
-    return true;
-  } catch (error) {
-    samplerReady = false;
-    console.error("No se pudo cargar el sampler de piano:", error);
-    return false;
-  }
+  })();
+
+  await samplerLoadingPromise;
+  samplerLoadingPromise = null;
+  return samplerReady && Boolean(pianoSampler);
+}
+
+function warmupPianoSampler() {
+  if (samplerReady || samplerLoadingPromise) return;
+  // Cargar en segundo plano para no bloquear inicio de ronda.
+  void ensurePianoSampler();
 }
 
 function createHammerNoiseBuffer() {
@@ -505,9 +521,18 @@ function createTriadTargetWithoutImmediateRepeat() {
 }
 
 function flashOverlay(type, milliseconds) {
+  if (overlayTimeoutId) {
+    window.clearTimeout(overlayTimeoutId);
+    overlayTimeoutId = null;
+  }
+
+  overlay.className = "overlay";
+  // Forzamos reflow para reiniciar la transición incluso en flashes seguidos.
+  void overlay.offsetWidth;
   overlay.className = `overlay show ${type}`;
-  window.setTimeout(() => {
+  overlayTimeoutId = window.setTimeout(() => {
     overlay.className = "overlay";
+    overlayTimeoutId = null;
   }, milliseconds);
 }
 
@@ -960,7 +985,7 @@ async function startGame() {
     if (audioContext.state === "suspended") {
       await audioContext.resume();
     }
-    await ensurePianoSampler();
+    warmupPianoSampler();
 
     stopMicrophoneDetection();
     stopMidiInput();
@@ -999,7 +1024,7 @@ async function startGame() {
     skipBtn.disabled = false;
     message.textContent = samplerReady
       ? "Juego iniciado."
-      : "Juego iniciado (sonido básico, no se pudo cargar el piano real).";
+      : "Juego iniciado (cargando piano real en segundo plano).";
     beginRound();
   } catch (error) {
     isRunning = false;

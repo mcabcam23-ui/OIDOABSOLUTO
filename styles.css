@@ -180,8 +180,9 @@ select {
   position: fixed;
   inset: 0;
   pointer-events: none;
+  z-index: 9999;
   opacity: 0;
-  transition: opacity 120ms linear;
+  transition: opacity 140ms linear;
 }
 
 .overlay.show {
@@ -189,9 +190,9 @@ select {
 }
 
 .overlay.success {
-  background: rgba(0, 255, 0, 0.28);
+  background: rgba(0, 255, 0, 0.45);
 }
 
 .overlay.error {
-  background: rgba(255, 0, 0, 0.28);
+  background: rgba(255, 0, 0, 0.45);
 }
