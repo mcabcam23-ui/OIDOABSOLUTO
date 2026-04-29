@@ -74,6 +74,8 @@ let micHarmonicityMin = 1.05;
 let micPrevRms = 0;
 let micAttackArmed = false;
 let micAttackWindowUntilMs = 0;
+let micHighEnergyAccumMs = 0;
+let micLastDetectedNoteAtMs = 0;
 let micRecentMidiNotes = [];
 let overlayTimeoutId = null;
 let hammerNoiseBuffer = null;
@@ -190,6 +192,7 @@ function blockMicDetectionFor(durationSeconds, extraMs = micBlockExtraMs) {
   micPrevRms = 0;
   micAttackArmed = false;
   micAttackWindowUntilMs = 0;
+  micHighEnergyAccumMs = 0;
   stableDetectedNote = null;
   stableFrames = 0;
 }
@@ -789,6 +792,8 @@ function stopMicrophoneDetection() {
   micPrevRms = 0;
   micAttackArmed = false;
   micAttackWindowUntilMs = 0;
+  micHighEnergyAccumMs = 0;
+  micLastDetectedNoteAtMs = 0;
   clearMicNoteHistory();
   singleGuessLockedNote = null;
 }
@@ -805,6 +810,7 @@ function runMicrophoneLoop() {
     micSilenceAccumMs = 0;
     micAttackArmed = false;
     micAttackWindowUntilMs = 0;
+    micHighEnergyAccumMs = 0;
     micPrevRms = 0;
     clearMicNoteHistory();
     stableDetectedNote = null;
@@ -827,6 +833,7 @@ function runMicrophoneLoop() {
     }
 
     if (micSilenceAccumMs < micSilenceRequiredMs) {
+      micHighEnergyAccumMs = 0;
       micPrevRms = rms;
       clearMicNoteHistory();
       stableDetectedNote = null;
@@ -844,6 +851,7 @@ function runMicrophoneLoop() {
       singleGuessLockedNote = null;
     }
     micPrevRms = rms;
+    micHighEnergyAccumMs = 0;
     clearMicNoteHistory();
     stableDetectedNote = null;
     stableFrames = 0;
@@ -856,10 +864,22 @@ function runMicrophoneLoop() {
   if (gameMode === "single") {
     const attackThreshold = micMinDetectRms * 1.25;
     const strongRise = rms - micPrevRms > micMinDetectRms * 0.45;
+    const highEnergy = rms > micMinDetectRms * 2.1;
+    if (highEnergy) {
+      micHighEnergyAccumMs += frameDeltaMs;
+    } else {
+      micHighEnergyAccumMs = 0;
+    }
+
+    // Si hay energía sostenida real y lleva tiempo sin detecciones,
+    // relajamos el bloqueo de ataque para no "comerse" notas válidas.
+    const staleDetection = Date.now() - micLastDetectedNoteAtMs > 2500;
+    const sustainedPlayable = micHighEnergyAccumMs > 130 && staleDetection;
     const hasNewAttack =
       (micPrevRms < micSilenceRmsThreshold && rms >= attackThreshold) ||
       strongRise ||
-      rms > attackThreshold * 1.8;
+      rms > attackThreshold * 1.8 ||
+      sustainedPlayable;
     if (!micAttackArmed && hasNewAttack) {
       micAttackArmed = true;
       micAttackWindowUntilMs = Date.now() + 1400;
@@ -914,8 +934,11 @@ function runMicrophoneLoop() {
       const now = Date.now();
       if (stableFrames >= micStableFramesRequired && now - lastDetectedAt > micDetectionCooldownMs) {
         lastDetectedAt = now;
+        micLastDetectedNoteAtMs = now;
+        connectionStatus.textContent = "Micrófono activo (detectando)";
         handleGuess(dominantMidi);
         clearMicNoteHistory();
+        micHighEnergyAccumMs = 0;
         if (gameMode === "single") {
           micAttackArmed = false;
           micAttackWindowUntilMs = 0;
@@ -942,14 +965,18 @@ async function initializeMicrophone() {
   }
 
   stopMicrophoneDetection();
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-    video: false,
-  });
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+  } catch (error) {
+    throw new Error("No se pudo activar el micrófono. Revisa permisos del navegador.");
+  }
 
   micSource = audioContext.createMediaStreamSource(micStream);
   micHighpassFilter = audioContext.createBiquadFilter();
@@ -971,8 +998,10 @@ async function initializeMicrophone() {
   micPrevRms = 0;
   micAttackArmed = false;
   micAttackWindowUntilMs = 0;
+  micHighEnergyAccumMs = 0;
+  micLastDetectedNoteAtMs = Date.now();
   clearMicNoteHistory();
-  connectionStatus.textContent = "Micrófono activo";
+  connectionStatus.textContent = "Micrófono activo (escuchando)";
   runMicrophoneLoop();
 }
 
