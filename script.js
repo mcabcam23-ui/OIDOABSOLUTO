@@ -735,10 +735,10 @@ function autoCorrelate(buffer, sampleRate) {
 
   let bestOffset = -1;
   let bestCorrelation = 0;
-  const minFrequency = midiToFrequency(MAX_MIDI_NOTE);
-  const maxFrequency = midiToFrequency(MIN_MIDI_NOTE);
-  const minOffset = Math.max(2, Math.floor(sampleRate / maxFrequency));
-  const maxOffset = Math.min(Math.floor(buffer.length / 2), Math.ceil(sampleRate / minFrequency));
+  const highestFrequency = midiToFrequency(MAX_MIDI_NOTE);
+  const lowestFrequency = midiToFrequency(MIN_MIDI_NOTE);
+  const minOffset = Math.max(2, Math.floor(sampleRate / highestFrequency));
+  const maxOffset = Math.min(Math.floor(buffer.length / 2), Math.ceil(sampleRate / lowestFrequency));
   const maxSamples = Math.floor(buffer.length / 2);
 
   for (let offset = minOffset; offset <= maxOffset; offset += 1) {
